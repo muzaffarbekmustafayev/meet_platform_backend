@@ -16,6 +16,7 @@ const socketHandler = (server) => {
     const sharingUser = {};       
     const blockedUsers = {};      
     const waitingRoom = {};       
+    const admittedUsers = {}; // roomId -> Set of userIds to prevent re-entering waiting room on refresh
 
     function getRoomRole(meeting, userId, isGuest) {
         if (isGuest) return 'guest';
@@ -60,13 +61,15 @@ const socketHandler = (server) => {
             const role = getRoomRole(meeting, userId, isGuest);
 
             if (meeting?.settings?.isWaitingRoomEnabled && role === 'participant') {
-                if (!waitingRoom[roomID]) waitingRoom[roomID] = [];
+                if (!admittedUsers[roomID] || !admittedUsers[roomID].has(userId)) {
+                    if (!waitingRoom[roomID]) waitingRoom[roomID] = [];
                 if (!waitingRoom[roomID].find(u => u.userId === userId)) {
                     waitingRoom[roomID].push({ socketId: socket.id, userId, userName, isGuest });
                 }
                 socket.emit('waiting-room');
                 broadcastWaitingRoom(roomID);
                 return;
+                }
             }
 
             await admitUser(socket, roomID, userId, userName, role, meeting);
@@ -79,6 +82,9 @@ const socketHandler = (server) => {
 
             socket.join(roomID);
             socketToRoom[socket.id] = roomID;
+
+            if (!admittedUsers[roomID]) admittedUsers[roomID] = new Set();
+            admittedUsers[roomID].add(userId);
 
             const userData = { socketId: socket.id, userId, userName, micStatus: true, videoStatus: true, role };
             if (users[roomID]) {
@@ -160,9 +166,76 @@ const socketHandler = (server) => {
             socket.to(roomId).emit('screen-sharing-started', { socketId: socket.id, userId, userName, role });
         });
 
-        socket.on('stop-screen-share', (roomId) => {
+        // FIX: accept { roomId } object (client sends object, not string)
+        socket.on('stop-screen-share', ({ roomId }) => {
             delete sharingUser[roomId];
             socket.to(roomId).emit('screen-sharing-stopped');
+        });
+
+        socket.on('hand-raise', ({ roomId, userId }) => {
+            socket.to(roomId).emit('user-hand-raised', userId);
+        });
+
+        socket.on('give-turn', ({ roomId, targetUserId }) => {
+            io.to(roomId).emit('turn-updated', { userId: targetUserId });
+        });
+
+        socket.on('mute-all', ({ roomId }) => {
+            socket.to(roomId).emit('room-muted-all');
+        });
+
+        socket.on('update-media-status', ({ roomId, micStatus, videoStatus }) => {
+            if (users[roomId]) {
+                const user = users[roomId].find(u => u.socketId === socket.id);
+                if (user) {
+                    if (micStatus !== undefined) user.micStatus = micStatus;
+                    if (videoStatus !== undefined) user.videoStatus = videoStatus;
+                    io.to(roomId).emit('update-user-list', users[roomId]);
+                }
+            }
+        });
+
+        socket.on('block-user', ({ roomId, targetUserId, targetSocketId }) => {
+            io.to(targetSocketId).emit('blocked');
+            if (!blockedUsers[roomId]) blockedUsers[roomId] = new Set();
+            blockedUsers[roomId].add(targetUserId);
+            // Remove from room
+            if (users[roomId]) {
+                users[roomId] = users[roomId].filter(u => u.socketId !== targetSocketId);
+                io.to(roomId).emit('update-user-list', users[roomId]);
+            }
+        });
+
+        socket.on('file-message', ({ roomId, userId, userName, file }) => {
+            io.to(roomId).emit('chat-message', {
+                userName,
+                file,
+                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            });
+        });
+
+        socket.on('request-to-share', ({ roomId, hostId, userId, userName, type }) => {
+            // Find host/cohost socket and forward request
+            if (users[roomId]) {
+                const moderators = users[roomId].filter(u => u.role === 'host' || u.role === 'cohost');
+                moderators.forEach(mod => {
+                    io.to(mod.socketId).emit('share-request-received', {
+                        userId,
+                        userName,
+                        type,
+                        requesterSocketId: socket.id
+                    });
+                });
+            }
+        });
+
+        socket.on('share-permission-response', ({ userId, approved, type }) => {
+            // userId here is the requester's socketId
+            io.to(userId).emit('share-request-result', { approved, type });
+        });
+
+        socket.on('force-stop-share', ({ roomId, targetSocketId }) => {
+            io.to(targetSocketId).emit('force-stop-share');
         });
 
         socket.on('disconnect', () => {
@@ -181,12 +254,16 @@ const socketHandler = (server) => {
             delete users[roomId];
             delete sharingUser[roomId];
             delete waitingRoom[roomId];
+            delete admittedUsers[roomId];
         });
 
         socket.on('kick-user', ({ roomId, targetSocketId, targetUserId }) => {
-            io.to(targetSocketId).emit('blocked');
-            if (!blockedUsers[roomId]) blockedUsers[roomId] = new Set();
-            blockedUsers[roomId].add(targetUserId);
+            io.to(targetSocketId).emit('kicked');
+            // Remove from active users (not permanently blocked)
+            if (users[roomId]) {
+                users[roomId] = users[roomId].filter(u => u.socketId !== targetSocketId);
+                io.to(roomId).emit('update-user-list', users[roomId]);
+            }
         });
 
         socket.on('promote-cohost', ({ roomId, targetUserId, targetSocketId }) => {
