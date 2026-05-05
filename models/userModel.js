@@ -11,6 +11,15 @@ const userSchema = mongoose.Schema({
         required: true,
         unique: true
     },
+    username: {
+        type: String,
+        unique: true,
+        sparse: true
+    },
+    links: [{
+        title: String,
+        url: String
+    }],
     password: {
         type: String,
         required: true,
@@ -22,13 +31,33 @@ const userSchema = mongoose.Schema({
     },
     role: {
         type: String,
-        enum: ['admin', 'host', 'participant', 'guest'],
-        default: 'participant'
+        enum: ['admin', 'user', 'guest'],
+        default: 'user'
     },
     isBlocked: {
         type: Boolean,
         default: false
     },
+    bio: {
+        type: String,
+        default: 'Zamonaviy video aloqa tizimi ishqibozi.'
+    },
+    contactsCount: {
+        type: Number,
+        default: 0
+    },
+    followersCount: {
+        type: Number,
+        default: 0
+    },
+    followers: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    }],
+    following: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    }],
     googleId: String
 }, {
     timestamps: true

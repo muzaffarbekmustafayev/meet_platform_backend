@@ -190,8 +190,8 @@ const socketHandler = (server) => {
             socket.to(roomId).emit('screen-sharing-stopped');
         });
 
-        socket.on('hand-raise', ({ roomId, userId }) => {
-            socket.to(roomId).emit('user-hand-raised', userId);
+        socket.on('hand-raise', ({ roomId, userId, userName }) => {
+            socket.to(roomId).emit('user-hand-raised', { userId, userName });
         });
 
         socket.on('give-turn', ({ roomId, targetUserId }) => {

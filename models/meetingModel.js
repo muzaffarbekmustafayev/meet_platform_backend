@@ -37,6 +37,10 @@ const meetingSchema = mongoose.Schema({
         isWaitingRoomEnabled: { type: Boolean, default: true },
         muteAllOnEntry: { type: Boolean, default: false },
         allowScreenSharing: { type: Boolean, default: true }
+    },
+    isPinned: {
+        type: Boolean,
+        default: false
     }
 }, {
     timestamps: true

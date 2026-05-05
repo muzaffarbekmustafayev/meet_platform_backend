@@ -5,113 +5,123 @@ const getStats = async (req, res) => {
     try {
         const totalUsers = await User.countDocuments();
         const totalMeetings = await Meeting.countDocuments();
-        const hosts = await User.countDocuments({ role: 'host' });
-        const participants = await User.countDocuments({ role: 'participant' });
+        const users = await User.countDocuments({ role: 'user' });
+        const admins = await User.countDocuments({ role: 'admin' });
         
-        res.json({
+        return res.json({
             totalUsers,
             totalMeetings,
-            hosts,
-            participants
+            users,
+            admins
         });
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
 };
 
 const getAllUsers = async (req, res) => {
     try {
         const users = await User.find({}).select('-password');
-        res.json(users);
+        return res.json(users);
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
 };
 
 const updateUserRole = async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
-        if (user) {
-            user.role = req.body.role || user.role;
-            const updatedUser = await user.save();
-            res.json(updatedUser);
-        } else {
-            res.status(404).json({ message: 'User not found' });
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
         }
+
+        user.role = req.body.role || user.role;
+        const updatedUser = await user.save();
+        
+        return res.json(updatedUser);
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
 };
 
 const toggleBlockUser = async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
-        if (user) {
-            user.isBlocked = !user.isBlocked;
-            await user.save();
-            res.json({ message: `User ${user.isBlocked ? 'blocked' : 'unblocked'}` });
-        } else {
-            res.status(404).json({ message: 'User not found' });
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
         }
+
+        user.isBlocked = !user.isBlocked;
+        await user.save();
+        
+        return res.json({ message: `User ${user.isBlocked ? 'blocked' : 'unblocked'} successfully` });
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
 };
 
 const createUser = async (req, res) => {
     try {
         const { name, email, password, role } = req.body;
+        
+        if (!name || !email || !password) {
+            return res.status(400).json({ message: 'Please provide all required fields' });
+        }
+
         const userExists = await User.findOne({ email });
         if (userExists) {
-            return res.status(400).json({ message: 'User already exists' });
+            return res.status(400).json({ message: 'User with this email already exists' });
         }
-        const user = await User.create({ name, email, password, role });
-        res.status(201).json(user);
+        
+        const user = await User.create({ name, email, password, role: role || 'user' });
+        return res.status(201).json(user);
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
 };
 
 const updateUser = async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
-        if (user) {
-            user.name = req.body.name || user.name;
-            user.email = req.body.email || user.email;
-            user.role = req.body.role || user.role;
-            if (req.body.password) {
-                user.password = req.body.password;
-            }
-            const updatedUser = await user.save();
-            res.json(updatedUser);
-        } else {
-            res.status(404).json({ message: 'User not found' });
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
         }
+
+        user.name = req.body.name || user.name;
+        user.email = req.body.email || user.email;
+        user.role = req.body.role || user.role;
+        
+        if (req.body.password) {
+            user.password = req.body.password;
+        }
+        
+        const updatedUser = await user.save();
+        return res.json(updatedUser);
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
 };
 
 const getAllMeetings = async (req, res) => {
     try {
-        const meetings = await Meeting.find({}).populate('hostId', 'name email');
-        res.json(meetings);
+        const meetings = await Meeting.find({}).populate('hostId', 'name email').sort({ createdAt: -1 });
+        return res.json(meetings);
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
 };
 
 const deleteMeeting = async (req, res) => {
     try {
         const meeting = await Meeting.findById(req.params.id);
-        if (meeting) {
-            await meeting.deleteOne();
-            res.json({ message: 'Meeting deleted successfully' });
-        } else {
-            res.status(404).json({ message: 'Meeting not found' });
+        if (!meeting) {
+            return res.status(404).json({ message: 'Meeting not found' });
         }
+
+        await meeting.deleteOne();
+        return res.json({ message: 'Meeting deleted successfully' });
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        return res.status(500).json({ message: error.message });
     }
 };
 
