@@ -62,9 +62,10 @@ const toggleBlockUser = async (req, res) => {
 
 const createUser = async (req, res) => {
     try {
-        const { name, email, password, role } = req.body;
+        const { name, email, password, username, role } = req.body;
         
-        if (!name || !email || !password) {
+        // Password is required only for non-guest users
+        if (!name || !email || (!password && role !== 'guest')) {
             return res.status(400).json({ message: 'Please provide all required fields' });
         }
 
@@ -72,8 +73,23 @@ const createUser = async (req, res) => {
         if (userExists) {
             return res.status(400).json({ message: 'User with this email already exists' });
         }
+
+        if (username) {
+            const usernameExists = await User.findOne({ username });
+            if (usernameExists) {
+                return res.status(400).json({ message: 'Username already taken' });
+            }
+        }
         
-        const user = await User.create({ name, email, password, role: role || 'user' });
+        const userData = { name, email, username, role: role || 'user' };
+        if (password) {
+            userData.password = password;
+        }
+        if (!username && role === 'guest') {
+            userData.username = `guest_${Date.now()}`;
+        }
+        
+        const user = await User.create(userData);
         return res.status(201).json(user);
     } catch (error) {
         return res.status(500).json({ message: error.message });
@@ -90,6 +106,7 @@ const updateUser = async (req, res) => {
         user.name = req.body.name || user.name;
         user.email = req.body.email || user.email;
         user.role = req.body.role || user.role;
+        user.username = req.body.username || user.username;
         
         if (req.body.password) {
             user.password = req.body.password;

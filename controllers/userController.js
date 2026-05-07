@@ -72,6 +72,40 @@ const authUser = async (req, res) => {
     }
 };
 
+const guestLogin = async (req, res) => {
+    try {
+        const { name, email } = req.body;
+
+        if (!name || !email) {
+            return res.status(400).json({ message: 'Please provide name and email for guest login' });
+        }
+
+        // Check if guest already exists
+        let guestUser = await User.findOne({ email, role: 'guest' });
+
+        if (!guestUser) {
+            // Create a new guest user
+            guestUser = await User.create({
+                name,
+                email,
+                role: 'guest',
+                username: `guest_${Date.now()}` // Generate unique username for guest
+            });
+        }
+
+        return res.json({
+            _id: guestUser._id,
+            name: guestUser.name,
+            email: guestUser.email,
+            role: guestUser.role,
+            avatar: guestUser.avatar,
+            token: generateToken(guestUser._id)
+        });
+    } catch (error) {
+        return res.status(500).json({ message: error.message });
+    }
+};
+
 const getUserProfile = async (req, res) => {
     try {
         const user = await User.findById(req.user._id)
@@ -247,4 +281,4 @@ const searchUsers = async (req, res) => {
     }
 };
 
-module.exports = { registerUser, authUser, getUserProfile, updateUserProfile, forgotPassword, googleAuth, followUser, unfollowUser, searchUsers };
+module.exports = { registerUser, authUser, guestLogin, getUserProfile, updateUserProfile, forgotPassword, googleAuth, followUser, unfollowUser, searchUsers };

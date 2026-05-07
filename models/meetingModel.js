@@ -15,6 +15,11 @@ const meetingSchema = mongoose.Schema({
         unique: true,
         required: true
     },
+    roomType: {
+        type: String,
+        enum: ['public', 'private'],
+        default: 'public'
+    },
     password: {
         type: String
     },

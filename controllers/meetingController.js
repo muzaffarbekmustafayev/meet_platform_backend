@@ -9,13 +9,24 @@ const generateMeetingCode = () => {
 
 const createMeeting = async (req, res) => {
     try {
-        const { title, password } = req.body;
+        const { title, password, roomType } = req.body;
+
+        // Validation for private rooms
+        if (roomType === 'private' && !password) {
+            return res.status(400).json({ message: 'Password is required for private rooms' });
+        }
+
+        // Public rooms should not have password
+        if (roomType === 'public' && password) {
+            return res.status(400).json({ message: 'Public rooms cannot have password protection' });
+        }
 
         const meeting = await Meeting.create({
             hostId: req.user._id,
             title: title || `${req.user.name}'s Meeting`,
             meetingCode: generateMeetingCode(),
-            password
+            roomType: roomType || 'public',
+            password: roomType === 'private' ? password : undefined
         });
         
         return res.status(201).json(meeting);
@@ -32,6 +43,22 @@ const getMeetingByCode = async (req, res) => {
 
         if (!meeting) {
             return res.status(404).json({ message: 'Meeting not found' });
+        }
+
+        // If it's a private room, check if password is provided and correct
+        if (meeting.roomType === 'private') {
+            const providedPassword = req.query.password || req.body.password;
+            
+            if (!providedPassword) {
+                return res.status(403).json({ 
+                    message: 'Password required for this private room',
+                    requiresPassword: true 
+                });
+            }
+
+            if (providedPassword !== meeting.password) {
+                return res.status(403).json({ message: 'Invalid password' });
+            }
         }
 
         return res.json(meeting);

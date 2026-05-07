@@ -22,7 +22,7 @@ const userSchema = mongoose.Schema({
     }],
     password: {
         type: String,
-        required: true,
+        required: function() { return this.role !== 'guest'; },
         minlength: 6
     },
     avatar: {
