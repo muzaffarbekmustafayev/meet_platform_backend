@@ -160,6 +160,23 @@ const updateUser = asyncHandler(async (req, res) => {
     return res.json(safe);
 });
 
+const deleteUser = asyncHandler(async (req, res) => {
+    const user = await User.findById(req.params.id);
+    if (!user) {
+        res.status(404);
+        throw new Error('User not found');
+    }
+
+    // Don't allow deleting yourself
+    if (user._id.equals(req.user._id)) {
+        res.status(400);
+        throw new Error('Cannot delete your own account');
+    }
+
+    await User.findByIdAndDelete(req.params.id);
+    return res.json({ message: 'User deleted successfully' });
+});
+
 const getAllMeetings = asyncHandler(async (req, res) => {
     const meetings = await Meeting.find({ deletedAt: null })
         .populate('hostId', 'name email')
@@ -186,6 +203,7 @@ module.exports = {
     toggleBlockUser,
     createUser,
     updateUser,
+    deleteUser,
     getAllMeetings,
     deleteMeeting
 };
