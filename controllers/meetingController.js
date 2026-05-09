@@ -26,6 +26,15 @@ const sanitizeMeeting = (meeting) => {
 
 const createMeeting = asyncHandler(async (req, res) => {
     const { title, password, roomType } = req.body;
+
+    // Manual validation: private rooms must have a password
+    if (roomType === 'private') {
+        if (!password || String(password).trim().length < 6) {
+            res.status(400);
+            throw new Error('Private rooms require a password of at least 6 characters');
+        }
+    }
+
     const meetingCode = await generateUniqueMeetingCode();
 
     const meeting = await Meeting.create({
@@ -33,7 +42,7 @@ const createMeeting = asyncHandler(async (req, res) => {
         title: title || `${req.user.name}'s Meeting`,
         meetingCode,
         roomType: roomType || 'public',
-        password: roomType === 'private' ? password : undefined
+        password: roomType === 'private' ? String(password).trim() : undefined
     });
 
     return res.status(201).json(sanitizeMeeting(meeting));
@@ -218,12 +227,32 @@ const getMeetingActivity = asyncHandler(async (req, res) => {
     return res.json(data);
 });
 
+const changeMeetingPassword = asyncHandler(async (req, res) => {
+    const meeting = await Meeting.findById(req.params.id).select('+password');
+    if (!meeting) { res.status(404); throw new Error('Meeting not found'); }
+    if (meeting.hostId.toString() !== req.user._id.toString()) {
+        res.status(403); throw new Error('Only host can change room password');
+    }
+    if (meeting.roomType !== 'private') {
+        res.status(400); throw new Error('Only private meetings have passwords');
+    }
+
+    const { oldPassword, newPassword } = req.body;
+    const isMatch = await meeting.matchPassword(String(oldPassword));
+    if (!isMatch) { res.status(403); throw new Error('Current password is incorrect'); }
+
+    meeting.password = newPassword;
+    await meeting.save();
+    return res.json({ message: 'Password updated successfully' });
+});
+
 module.exports = {
     createMeeting,
     getMeetingByCode,
     getMyMeetings,
     deleteMeeting,
     updateMeeting,
+    changeMeetingPassword,
     promoteToCoHost,
     removeCoHost,
     getPinnedMeetings,

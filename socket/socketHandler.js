@@ -176,16 +176,49 @@ const socketHandler = (server, opts = {}) => {
             socket.emit('previous-messages', prevMessages);
         }
 
-        safeOn(socket, 'join-room', async (roomID, userId, userName, isGuest) => {
+        safeOn(socket, 'join-room', async (roomID, userId, userName, isGuest, password) => {
             if (!roomID || !userId) return;
             // If authenticated, ignore client-supplied userId — use the verified one.
             if (socket.authUserId && !isGuest) userId = socket.authUserId;
 
-            const meeting = await Meeting.findOne({ meetingCode: roomID, deletedAt: null }).populate('hostId', 'name');
+            const meeting = await Meeting.findOne({ meetingCode: roomID, deletedAt: null }).select('+password').populate('hostId', 'name');
             if (!meeting) {
                 socket.emit('room-not-found');
                 return;
             }
+
+            // Validate password for private rooms (with rate limiting)
+            if (meeting.roomType === 'private') {
+                const clientIp = socket.handshake.address || 'unknown';
+                const { checkSocketAttempt, recordSocketFailure, clearSocketAttempts } = require('../middleware/rateLimiters');
+                const check = checkSocketAttempt(clientIp, roomID);
+                if (!check.allowed) {
+                    socket.emit('error', {
+                        message: `Too many password attempts. Try again in ${check.retryAfter} seconds.`,
+                        retryAfter: check.retryAfter
+                    });
+                    return;
+                }
+
+                if (!password) {
+                    socket.emit('error', { message: 'Password required for private room' });
+                    return;
+                }
+                try {
+                    const passwordMatch = await meeting.matchPassword(String(password));
+                    if (!passwordMatch) {
+                        recordSocketFailure(clientIp, roomID);
+                        socket.emit('error', { message: 'Invalid room password' });
+                        return;
+                    }
+                    // Successful — clear failure count
+                    clearSocketAttempts(clientIp, roomID);
+                } catch (err) {
+                    socket.emit('error', { message: 'Password validation failed' });
+                    return;
+                }
+            }
+
             const role = getRoomRole(meeting, userId, isGuest);
 
             if (blockedUsers[roomID]?.has(userId)) {
