@@ -152,7 +152,8 @@ const socketHandler = (server, opts = {}) => {
             if (!admittedUsers[roomID]) admittedUsers[roomID] = new Map();
             admittedUsers[roomID].set(userId, Date.now());
 
-            const userData = { socketId: socket.id, userId, userName, micStatus: true, videoStatus: true, role };
+            // Client haqiqiy holatini keyinroq 'update-media-status' orqali yuboradi
+            const userData = { socketId: socket.id, userId, userName, micStatus: false, videoStatus: false, role };
             if (users[roomID]) users[roomID].push(userData);
             else users[roomID] = [userData];
 
