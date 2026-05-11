@@ -9,7 +9,6 @@ const sendUser = (user, withToken = false) => {
         _id: user._id,
         name: user.name,
         email: user.email,
-        username: user.username,
         role: user.role,
         avatar: user.avatar,
         bio: user.bio,
@@ -22,12 +21,12 @@ const sendUser = (user, withToken = false) => {
 };
 
 const registerUser = asyncHandler(async (req, res) => {
-    const { name, email, password, role, username } = req.body;
+    const { name, email, password, role } = req.body;
 
-    const userExists = await User.findOne({ $or: [{ email }, { username }] });
+    const userExists = await User.findOne({ email });
     if (userExists) {
         res.status(409);
-        throw new Error('User with this email or username already exists');
+        throw new Error('User with this email already exists');
     }
 
     const safeRole = role === 'admin' ? 'user' : (role || 'user');
@@ -35,7 +34,6 @@ const registerUser = asyncHandler(async (req, res) => {
     const user = await User.create({
         name,
         email,
-        username,
         password,
         role: safeRole
     });
@@ -75,7 +73,6 @@ const guestLogin = asyncHandler(async (req, res) => {
         name,
         email: synthEmail,
         role: 'guest',
-        username: `guest_${Date.now()}_${rand}`,
         bio: email ? `Guest contact: ${email}` : undefined
     });
 
@@ -170,7 +167,6 @@ const googleAuth = asyncHandler(async (req, res) => {
                 email,
                 avatar: picture,
                 role: 'user',
-                username: email.split('@')[0] + '_' + crypto.randomBytes(3).toString('hex'),
                 password: crypto.randomBytes(32).toString('hex') // Random password for OAuth users
             });
         }
@@ -255,11 +251,11 @@ const searchUsers = asyncHandler(async (req, res) => {
         _id: { $ne: req.user._id },
         role: { $ne: 'guest' },
         $or: [
-            { username: { $regex: safe, $options: 'i' } },
-            { name: { $regex: safe, $options: 'i' } }
+            { name: { $regex: safe, $options: 'i' } },
+            { email: { $regex: safe, $options: 'i' } }
         ]
     })
-        .select('_id name email username avatar role')
+        .select('_id name email avatar role')
         .limit(20);
     return res.json(users);
 });

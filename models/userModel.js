@@ -15,12 +15,6 @@ const userSchema = mongoose.Schema({
         lowercase: true,
         trim: true
     },
-    username: {
-        type: String,
-        unique: true,
-        sparse: true,
-        trim: true
-    },
     links: [{
         title: String,
         url: String
@@ -68,7 +62,7 @@ const userSchema = mongoose.Schema({
     timestamps: true
 });
 
-userSchema.index({ name: 'text', username: 'text' });
+userSchema.index({ name: 'text' });
 userSchema.index({ role: 1 });
 
 userSchema.pre('save', async function () {

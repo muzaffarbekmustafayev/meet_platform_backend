@@ -100,26 +100,16 @@ const toggleBlockUser = asyncHandler(async (req, res) => {
 });
 
 const createUser = asyncHandler(async (req, res) => {
-    const { name, email, password, username, role } = req.body;
+    const { name, email, password, role } = req.body;
 
     const userExists = await User.findOne({ email });
     if (userExists) {
         res.status(409);
         throw new Error('User with this email already exists');
     }
-    if (username) {
-        const usernameExists = await User.findOne({ username });
-        if (usernameExists) {
-            res.status(409);
-            throw new Error('Username already taken');
-        }
-    }
 
-    const userData = { name, email, username, role: role || 'user' };
+    const userData = { name, email, role: role || 'user' };
     if (password) userData.password = password;
-    if (!username && role === 'guest') {
-        userData.username = `guest_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
-    }
 
     const user = await User.create(userData);
     const safe = user.toObject();
@@ -141,14 +131,6 @@ const updateUser = asyncHandler(async (req, res) => {
             throw new Error('Email already taken');
         }
         user.email = req.body.email;
-    }
-    if (req.body.username && req.body.username !== user.username) {
-        const taken = await User.findOne({ username: req.body.username, _id: { $ne: user._id } });
-        if (taken) {
-            res.status(409);
-            throw new Error('Username already taken');
-        }
-        user.username = req.body.username;
     }
     if (req.body.name) user.name = req.body.name;
     if (req.body.role) user.role = req.body.role;
