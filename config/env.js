@@ -7,6 +7,10 @@ const validateEnv = () => {
         process.exit(1);
     }
 
+    if (!process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID === 'your_google_client_id_here') {
+        console.warn('WARN: GOOGLE_CLIENT_ID is not set — Google OAuth will be unavailable');
+    }
+
     if (process.env.NODE_ENV === 'production') {
         if (!process.env.MONGO_URI) {
             console.error('FATAL: MONGO_URI is required in production');
@@ -18,6 +22,10 @@ const validateEnv = () => {
         }
         if (/super_secret|change_me|dev_only|12345/i.test(process.env.JWT_SECRET)) {
             console.error('FATAL: JWT_SECRET looks like a default/example value');
+            process.exit(1);
+        }
+        if (!process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID === 'your_google_client_id_here') {
+            console.error('FATAL: GOOGLE_CLIENT_ID is required in production');
             process.exit(1);
         }
     }

@@ -24,41 +24,48 @@ const sendUser = (user, withToken = false) => {
 };
 
 const registerUser = asyncHandler(async (req, res) => {
-    const { name, email, password, role } = req.body;
+    const { role } = req.body;
+    const name = req.body.name?.trim();
+    const email = req.body.email?.toLowerCase().trim();
+    const password = req.body.password;
 
-    const userExists = await User.findOne({ email });
-    if (userExists) {
+    const existing = await User.findOne({ email }).select('_id').lean();
+    if (existing) {
         res.status(409);
-        throw new Error('User with this email already exists');
+        throw new Error('An account with this email already exists');
     }
 
     const safeRole = role === 'admin' ? 'user' : (role || 'user');
 
-    const user = await User.create({
-        name,
-        email,
-        password,
-        role: safeRole
-    });
+    const user = await User.create({ name, email, password, role: safeRole });
 
-    if (!user) {
-        res.status(400);
-        throw new Error('Invalid user data received');
-    }
     return res.status(201).json(sendUser(user, true));
 });
 
 const authUser = asyncHandler(async (req, res) => {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email });
+    const email = req.body.email?.toLowerCase().trim();
+    const { password } = req.body;
 
-    if (!user || !(await user.matchPassword(password))) {
+    const user = await User.findOne({ email });
+    if (!user) {
         res.status(401);
         throw new Error('Invalid email or password');
     }
+
     if (user.isBlocked) {
         res.status(403);
-        throw new Error('Your account is blocked by administration');
+        throw new Error('Your account has been suspended. Please contact support.');
+    }
+
+    if (!user.password) {
+        res.status(401);
+        throw new Error('This account uses Google Sign-In. Please sign in with Google.');
+    }
+
+    const isMatch = await user.matchPassword(password);
+    if (!isMatch) {
+        res.status(401);
+        throw new Error('Invalid email or password');
     }
 
     return res.json(sendUser(user, true));
@@ -120,6 +127,11 @@ const googleAuth = asyncHandler(async (req, res) => {
         throw new Error('Google token required');
     }
 
+    if (!process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID === 'your_google_client_id_here') {
+        res.status(503);
+        throw new Error('Google authentication is not configured on this server');
+    }
+
     let payload;
     try {
         const ticket = await googleClient.verifyIdToken({
@@ -127,16 +139,22 @@ const googleAuth = asyncHandler(async (req, res) => {
             audience: process.env.GOOGLE_CLIENT_ID,
         });
         payload = ticket.getPayload();
-    } catch {
+    } catch (err) {
+        console.error('[google-auth] token verification failed:', err.message);
         res.status(401);
-        throw new Error('Invalid Google token');
+        throw new Error('Invalid or expired Google token');
     }
 
-    const { email, name, picture, sub: googleId } = payload;
+    const { email, name, picture, sub: googleId, email_verified } = payload;
 
-    if (!email) {
+    if (!email || !googleId) {
         res.status(400);
-        throw new Error('Email not provided by Google');
+        throw new Error('Incomplete profile received from Google');
+    }
+
+    if (!email_verified) {
+        res.status(400);
+        throw new Error('Google account email is not verified');
     }
 
     let user = await User.findOne({ $or: [{ googleId }, { email }] });
@@ -147,14 +165,24 @@ const googleAuth = asyncHandler(async (req, res) => {
         if (name && !user.name) { user.name = name; changed = true; }
         if (changed) await user.save();
     } else {
-        user = await User.create({
-            name: name || email.split('@')[0],
-            email,
-            avatar: picture,
-            googleId,
-            role: 'user',
-            password: crypto.randomBytes(32).toString('hex'),
-        });
+        try {
+            user = await User.create({
+                name: name || email.split('@')[0],
+                email,
+                avatar: picture,
+                googleId,
+                role: 'user',
+                password: crypto.randomBytes(32).toString('hex'),
+            });
+        } catch (err) {
+            // Race condition: another request created this user concurrently
+            if (err.code === 11000) {
+                user = await User.findOne({ $or: [{ googleId }, { email }] });
+                if (!user) throw err;
+            } else {
+                throw err;
+            }
+        }
     }
 
     if (user.isBlocked) {
