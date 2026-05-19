@@ -21,7 +21,7 @@ const userSchema = mongoose.Schema({
     }],
     password: {
         type: String,
-        required: function () { return this.role !== 'guest'; },
+        required: function () { return !this.googleId; },
         minlength: 6
     },
     avatar: {
@@ -30,7 +30,7 @@ const userSchema = mongoose.Schema({
     },
     role: {
         type: String,
-        enum: ['admin', 'user', 'guest'],
+        enum: ['admin', 'user'],
         default: 'user'
     },
     isBlocked: {

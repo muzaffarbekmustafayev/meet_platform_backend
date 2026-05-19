@@ -4,17 +4,12 @@ const registerSchema = Joi.object({
     name: Joi.string().trim().min(2).max(80).required(),
     email: Joi.string().email().lowercase().trim().required(),
     password: Joi.string().min(6).max(128).required(),
-    role: Joi.string().valid('user', 'admin', 'guest').optional()
+    role: Joi.string().valid('user', 'admin').optional()
 });
 
 const loginSchema = Joi.object({
     email: Joi.string().email().lowercase().trim().required(),
     password: Joi.string().required()
-});
-
-const guestLoginSchema = Joi.object({
-    name: Joi.string().trim().min(1).max(80).required(),
-    email: Joi.string().email().lowercase().trim().required()
 });
 
 const forgotPasswordSchema = Joi.object({
@@ -35,29 +30,24 @@ const updateProfileSchema = Joi.object({
 const adminCreateUserSchema = Joi.object({
     name: Joi.string().trim().min(2).max(80).required(),
     email: Joi.string().email().lowercase().trim().required(),
-    password: Joi.string().min(6).max(128).when('role', {
-        is: 'guest',
-        then: Joi.optional(),
-        otherwise: Joi.required()
-    }),
-    role: Joi.string().valid('user', 'admin', 'guest').optional()
+    password: Joi.string().min(6).max(128).required(),
+    role: Joi.string().valid('user', 'admin').optional()
 });
 
 const adminUpdateUserSchema = Joi.object({
     name: Joi.string().trim().min(2).max(80).optional(),
     email: Joi.string().email().lowercase().trim().optional(),
     password: Joi.string().min(6).max(128).optional(),
-    role: Joi.string().valid('user', 'admin', 'guest').optional()
+    role: Joi.string().valid('user', 'admin').optional()
 });
 
 const updateRoleSchema = Joi.object({
-    role: Joi.string().valid('user', 'admin', 'guest').required()
+    role: Joi.string().valid('user', 'admin').required()
 });
 
 module.exports = {
     registerSchema,
     loginSchema,
-    guestLoginSchema,
     forgotPasswordSchema,
     updateProfileSchema,
     adminCreateUserSchema,

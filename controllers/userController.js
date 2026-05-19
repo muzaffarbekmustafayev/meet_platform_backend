@@ -1,8 +1,11 @@
 const asyncHandler = require('express-async-handler');
 const crypto = require('crypto');
+const { OAuth2Client } = require('google-auth-library');
 const User = require('../models/userModel');
 const generateToken = require('../config/generateToken');
 const escapeRegex = require('../utils/escapeRegex');
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const sendUser = (user, withToken = false) => {
     const payload = {
@@ -61,23 +64,6 @@ const authUser = asyncHandler(async (req, res) => {
     return res.json(sendUser(user, true));
 });
 
-const guestLogin = asyncHandler(async (req, res) => {
-    const { name, email } = req.body;
-    // Always create a fresh guest record. Synthesize a unique email so a
-    // guest can never inherit a previous guest user's identity by reusing
-    // an arbitrary email address.
-    const rand = crypto.randomBytes(6).toString('hex');
-    const synthEmail = `guest+${Date.now()}.${rand}@guest.local`;
-
-    const guestUser = await User.create({
-        name,
-        email: synthEmail,
-        role: 'guest',
-        bio: email ? `Guest contact: ${email}` : undefined
-    });
-
-    return res.json(sendUser(guestUser, true));
-});
 
 const getUserProfile = asyncHandler(async (req, res) => {
     const user = await User.findById(req.user._id)
@@ -134,53 +120,49 @@ const googleAuth = asyncHandler(async (req, res) => {
         throw new Error('Google token required');
     }
 
+    let payload;
     try {
-        // Verify token with Google (using client-side validation for demo)
-        // In production, verify at Google servers using google-auth-library
-        const parts = token.split('.');
-        if (parts.length !== 3) {
-            res.status(401);
-            throw new Error('Invalid token format');
-        }
-
-        // Decode payload (unsafe for production - use google-auth-library)
-        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
-        const { email, name, picture } = payload;
-
-        if (!email) {
-            res.status(400);
-            throw new Error('Email not provided by Google');
-        }
-
-        // Find or create user
-        let user = await User.findOne({ email });
-        if (user) {
-            // Update profile picture if available
-            if (picture && !user.avatar) {
-                user.avatar = picture;
-                await user.save();
-            }
-        } else {
-            // Create new user from Google profile
-            user = await User.create({
-                name: name || email.split('@')[0],
-                email,
-                avatar: picture,
-                role: 'user',
-                password: crypto.randomBytes(32).toString('hex') // Random password for OAuth users
-            });
-        }
-
-        if (user.isBlocked) {
-            res.status(403);
-            throw new Error('Your account is blocked by administration');
-        }
-
-        return res.json(sendUser(user, true));
-    } catch (error) {
+        const ticket = await googleClient.verifyIdToken({
+            idToken: token,
+            audience: process.env.GOOGLE_CLIENT_ID,
+        });
+        payload = ticket.getPayload();
+    } catch {
         res.status(401);
-        throw new Error('Invalid Google token: ' + error.message);
+        throw new Error('Invalid Google token');
     }
+
+    const { email, name, picture, sub: googleId } = payload;
+
+    if (!email) {
+        res.status(400);
+        throw new Error('Email not provided by Google');
+    }
+
+    let user = await User.findOne({ $or: [{ googleId }, { email }] });
+    if (user) {
+        let changed = false;
+        if (!user.googleId) { user.googleId = googleId; changed = true; }
+        if (picture && !user.avatar) { user.avatar = picture; changed = true; }
+        if (name && !user.name) { user.name = name; changed = true; }
+        if (changed) await user.save();
+    } else {
+        user = await User.create({
+            name: name || email.split('@')[0],
+            email,
+            avatar: picture,
+            googleId,
+            role: 'user',
+            password: crypto.randomBytes(32).toString('hex'),
+        });
+    }
+
+    if (user.isBlocked) {
+        res.status(403);
+        throw new Error('Your account is blocked by administration');
+    }
+
+    return res.json(sendUser(user, true));
 });
 
 const followUser = asyncHandler(async (req, res) => {
@@ -249,7 +231,6 @@ const searchUsers = asyncHandler(async (req, res) => {
     const safe = escapeRegex(raw).slice(0, 60);
     const users = await User.find({
         _id: { $ne: req.user._id },
-        role: { $ne: 'guest' },
         $or: [
             { name: { $regex: safe, $options: 'i' } },
             { email: { $regex: safe, $options: 'i' } }
@@ -263,7 +244,6 @@ const searchUsers = asyncHandler(async (req, res) => {
 module.exports = {
     registerUser,
     authUser,
-    guestLogin,
     getUserProfile,
     updateUserProfile,
     forgotPassword,

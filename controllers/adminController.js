@@ -12,7 +12,7 @@ const getStats = asyncHandler(async (req, res) => {
     chartStart.setDate(chartStart.getDate() - (days - 1));
 
     const [
-        totalUsers, totalMeetings, regularUsers, admins, guests,
+        totalUsers, totalMeetings, regularUsers, admins,
         blockedUsers, activeMeetings, totalMessages,
         publicMeetings, privateMeetings,
         newUsersToday, newMeetingsToday,
@@ -22,7 +22,6 @@ const getStats = asyncHandler(async (req, res) => {
         Meeting.countDocuments({ deletedAt: null }),
         User.countDocuments({ role: 'user' }),
         User.countDocuments({ role: 'admin' }),
-        User.countDocuments({ role: 'guest' }),
         User.countDocuments({ isBlocked: true }),
         Meeting.countDocuments({ deletedAt: null, status: 'active' }),
         Message.countDocuments(),
@@ -58,7 +57,7 @@ const getStats = asyncHandler(async (req, res) => {
     }));
 
     return res.json({
-        totalUsers, totalMeetings, users: regularUsers, admins, guests,
+        totalUsers, totalMeetings, users: regularUsers, admins,
         blockedUsers, activeMeetings, totalMessages,
         publicMeetings, privateMeetings,
         newUsersToday, newMeetingsToday,

@@ -22,13 +22,20 @@ const socketHandler = (server, opts = {}) => {
         }
     });
 
+    // roomId → [{ socketId, userId, userName, micStatus, videoStatus, role }]
     const users = {};
+    // socketId → roomId
     const socketToRoom = {};
+    // roomId → { socketId, userId, userName, role }
     const sharingUser = {};
+    // roomId → Set<userId>
     const blockedUsers = {};
+    // roomId → [{ socketId, userId, userName }]
     const waitingRoom = {};
-    const admittedUsers = {};   // roomId -> Map<userId, timestamp>
-    const chatRate = new Map(); // socketId -> [timestamps]
+    // roomId → Map<userId, timestamp>  (survives reconnect within TTL)
+    const admittedUsers = {};
+    // socketId → [timestamps]
+    const chatRate = new Map();
 
     const cleanupAdmitted = () => {
         const now = Date.now();
@@ -51,11 +58,10 @@ const socketHandler = (server, opts = {}) => {
         return !!u && u.role === 'host';
     }
 
-    function getRoomRole(meeting, userId, isGuest) {
-        if (isGuest) return 'guest';
+    function getRoomRole(meeting, userId) {
         if (!meeting) return 'participant';
-        if (String(meeting.hostId) === String(userId) ||
-            (meeting.hostId?._id && String(meeting.hostId._id) === String(userId))) return 'host';
+        const hostId = meeting.hostId?._id ? String(meeting.hostId._id) : String(meeting.hostId);
+        if (hostId === String(userId)) return 'host';
         const coHostIds = (meeting.coHosts || []).map(id => String(id._id || id));
         if (coHostIds.includes(String(userId))) return 'cohost';
         return 'participant';
@@ -76,10 +82,30 @@ const socketHandler = (server, opts = {}) => {
         }
         let room = users[roomID];
         if (room) {
+            const leaving = room.find(u => u.socketId === socket.id);
+            const wasHost = leaving?.role === 'host';
+
             room = room.filter(u => u.socketId !== socket.id);
             users[roomID] = room;
-            if (room.length === 0) delete users[roomID];
-            else io.to(roomID).emit('update-user-list', users[roomID]);
+
+            if (room.length === 0) {
+                delete users[roomID];
+            } else {
+                // Auto-promote: cohost → oldest participant
+                if (wasHost) {
+                    const next = room.find(u => u.role === 'cohost') || room[0];
+                    if (next) {
+                        next.role = 'host';
+                        io.to(next.socketId).emit('role-updated', { role: 'host' });
+                        io.to(roomID).emit('host-changed', {
+                            newHostSocketId: next.socketId,
+                            newHostUserId: next.userId,
+                            newHostName: next.userName
+                        });
+                    }
+                }
+                io.to(roomID).emit('update-user-list', room);
+            }
         }
         socket.to(roomID).emit('user-disconnected', socket.id);
         delete socketToRoom[socket.id];
@@ -109,7 +135,7 @@ const socketHandler = (server, opts = {}) => {
         });
     }
 
-    // Optional auth — attaches socket.authUserId if a valid token is provided.
+    // Auth middleware — attaches socket.authUserId if a valid JWT is provided.
     io.use(async (socket, next) => {
         const token = socket.handshake.auth?.token || socket.handshake.query?.token;
         if (!token) return next();
@@ -120,13 +146,14 @@ const socketHandler = (server, opts = {}) => {
                 socket.authUserId = String(user._id);
                 socket.authRole = user.role;
             }
-        } catch (_) { /* ignore — fall through unauthenticated */ }
+        } catch (_) { /* ignore unauthenticated */ }
         next();
     });
 
     io.on('connection', (socket) => {
+
         async function admitUser(socket, roomID, userId, userName, role, meeting) {
-            // Kick old socket if same user is reconnecting
+            // Kick old socket if same user reconnects
             if (users[roomID]) {
                 const existing = users[roomID].find(u => u.userId === userId && u.socketId !== socket.id);
                 if (existing) {
@@ -135,7 +162,6 @@ const socketHandler = (server, opts = {}) => {
                         oldSocket.leave(roomID);
                         oldSocket.disconnect(true);
                     }
-                    // Tell everyone the old socket disconnected BEFORE the new one joins
                     socket.to(roomID).emit('user-disconnected', existing.socketId);
                     delete socketToRoom[existing.socketId];
                     chatRate.delete(existing.socketId);
@@ -152,7 +178,6 @@ const socketHandler = (server, opts = {}) => {
             if (!admittedUsers[roomID]) admittedUsers[roomID] = new Map();
             admittedUsers[roomID].set(userId, Date.now());
 
-            // Client haqiqiy holatini keyinroq 'update-media-status' orqali yuboradi
             const userData = { socketId: socket.id, userId, userName, micStatus: false, videoStatus: false, role };
             if (users[roomID]) users[roomID].push(userData);
             else users[roomID] = [userData];
@@ -177,18 +202,22 @@ const socketHandler = (server, opts = {}) => {
             socket.emit('previous-messages', prevMessages);
         }
 
-        safeOn(socket, 'join-room', async (roomID, userId, userName, isGuest, password) => {
+        // ── join-room ──────────────────────────────────────────────────────────
+        safeOn(socket, 'join-room', async (roomID, userId, userName, password) => {
             if (!roomID || !userId) return;
-            // If authenticated, ignore client-supplied userId — use the verified one.
-            if (socket.authUserId && !isGuest) userId = socket.authUserId;
+            // Authenticated users: ignore client-supplied userId — use the verified one
+            if (socket.authUserId) userId = socket.authUserId;
 
-            const meeting = await Meeting.findOne({ meetingCode: roomID, deletedAt: null }).select('+password').populate('hostId', 'name');
+            const meeting = await Meeting.findOne({ meetingCode: roomID, deletedAt: null })
+                .select('+password')
+                .populate('hostId', 'name')
+                .populate('coHosts', '_id');
             if (!meeting) {
                 socket.emit('room-not-found');
                 return;
             }
 
-            // Validate password for private rooms (with rate limiting)
+            // Password check for private rooms
             if (meeting.roomType === 'private') {
                 const clientIp = socket.handshake.address || 'unknown';
                 const { checkSocketAttempt, recordSocketFailure, clearSocketAttempts } = require('../middleware/rateLimiters');
@@ -200,44 +229,62 @@ const socketHandler = (server, opts = {}) => {
                     });
                     return;
                 }
-
                 if (!password) {
                     socket.emit('error', { message: 'Password required for private room' });
                     return;
                 }
                 try {
-                    const passwordMatch = await meeting.matchPassword(String(password));
-                    if (!passwordMatch) {
+                    const ok = await meeting.matchPassword(String(password));
+                    if (!ok) {
                         recordSocketFailure(clientIp, roomID);
                         socket.emit('error', { message: 'Invalid room password' });
                         return;
                     }
-                    // Successful — clear failure count
                     clearSocketAttempts(clientIp, roomID);
-                } catch (err) {
+                } catch {
                     socket.emit('error', { message: 'Password validation failed' });
                     return;
                 }
             }
 
-            const role = getRoomRole(meeting, userId, isGuest);
+            const role = getRoomRole(meeting, userId);
 
             if (blockedUsers[roomID]?.has(userId)) {
                 socket.emit('blocked');
                 return;
             }
 
+            // Waiting room logic
+            const waitingEnabled = meeting.settings?.isWaitingRoomEnabled !== false;
+            const canSkipWaiting = role === 'host' || role === 'cohost';
+            const alreadyAdmitted = admittedUsers[roomID]?.has(userId);
+
+            if (waitingEnabled && !canSkipWaiting && !alreadyAdmitted) {
+                // Place in waiting room
+                if (!waitingRoom[roomID]) waitingRoom[roomID] = [];
+                // Remove stale entry for same user (e.g. page refresh)
+                waitingRoom[roomID] = waitingRoom[roomID].filter(u => u.userId !== userId && u.socketId !== socket.id);
+                waitingRoom[roomID].push({ socketId: socket.id, userId, userName });
+                socket.emit('waiting-room');
+                broadcastWaitingRoom(roomID);
+                return;
+            }
+
             await admitUser(socket, roomID, userId, userName, role, meeting);
         });
 
+        // ── admit-user (host/cohost action) ───────────────────────────────────
         safeOn(socket, 'admit-user', async ({ roomId, targetSocketId }) => {
             if (!isModerator(roomId, socket.id)) return;
             if (!waitingRoom[roomId]) return;
             const userToAdmit = waitingRoom[roomId].find(u => u.socketId === targetSocketId);
             if (!userToAdmit) return;
             waitingRoom[roomId] = waitingRoom[roomId].filter(u => u.socketId !== targetSocketId);
-            const meeting = await Meeting.findOne({ meetingCode: roomId, deletedAt: null });
-            const role = getRoomRole(meeting, userToAdmit.userId, userToAdmit.isGuest);
+
+            const meeting = await Meeting.findOne({ meetingCode: roomId, deletedAt: null })
+                .populate('hostId', 'name')
+                .populate('coHosts', '_id');
+            const role = getRoomRole(meeting, userToAdmit.userId);
             const targetSocket = io.sockets.sockets.get(targetSocketId);
             if (targetSocket) {
                 await admitUser(targetSocket, roomId, userToAdmit.userId, userToAdmit.userName, role, meeting);
@@ -245,6 +292,7 @@ const socketHandler = (server, opts = {}) => {
             broadcastWaitingRoom(roomId);
         });
 
+        // ── deny-user ─────────────────────────────────────────────────────────
         safeOn(socket, 'deny-user', ({ roomId, targetSocketId }) => {
             if (!isModerator(roomId, socket.id)) return;
             if (!waitingRoom[roomId]) return;
@@ -253,6 +301,7 @@ const socketHandler = (server, opts = {}) => {
             broadcastWaitingRoom(roomId);
         });
 
+        // ── WebRTC signalling ──────────────────────────────────────────────────
         safeOn(socket, 'sending-signal', payload => {
             if (!payload?.userToSignal) return;
             io.to(payload.userToSignal).emit('user-joined', {
@@ -267,6 +316,7 @@ const socketHandler = (server, opts = {}) => {
             });
         });
 
+        // ── Chat ──────────────────────────────────────────────────────────────
         safeOn(socket, 'chat-message', async ({ roomId, message, userName, userId }) => {
             if (!roomId || typeof message !== 'string') return;
             const text = message.trim();
@@ -319,7 +369,8 @@ const socketHandler = (server, opts = {}) => {
             io.to(roomId).emit('chat-message-deleted', { _id: messageId });
         });
 
-        safeOn(socket, 'start-screen-share', ({ roomId, userId, userName, role }) => {
+        // ── Screen share ───────────────────────────────────────────────────────
+        safeOn(socket, 'start-screen-share', ({ roomId }) => {
             const me = users[roomId]?.find(u => u.socketId === socket.id);
             if (!me) return;
             sharingUser[roomId] = { socketId: socket.id, userId: me.userId, userName: me.userName, role: me.role };
@@ -332,6 +383,7 @@ const socketHandler = (server, opts = {}) => {
             socket.to(roomId).emit('screen-sharing-stopped');
         });
 
+        // ── Moderation ─────────────────────────────────────────────────────────
         safeOn(socket, 'hand-raise', ({ roomId, userId, userName }) => {
             socket.to(roomId).emit('user-hand-raised', { userId, userName });
         });
@@ -366,85 +418,6 @@ const socketHandler = (server, opts = {}) => {
             }
         });
 
-        safeOn(socket, 'file-message', async ({ roomId, userId, userName, file }) => {
-            if (!roomId || !file || !file.data) return;
-            const senderUser = users[roomId]?.find(u => u.socketId === socket.id);
-            if (!senderUser) return;
-            const approxBytes = typeof file.data === 'string'
-                ? Math.floor(file.data.length * 3 / 4)
-                : 0;
-            if (approxBytes > MAX_FILE_BYTES) {
-                socket.emit('socket-error', { event: 'file-message', message: 'File too large' });
-                return;
-            }
-            if (!checkChatRate(socket.id)) {
-                socket.emit('socket-error', { event: 'file-message', message: 'Rate limit exceeded' });
-                return;
-            }
-            io.to(roomId).emit('chat-message', {
-                userName: senderUser.userName || userName,
-                senderId: socket.authUserId || userId || socket.id,
-                file,
-                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            });
-        });
-
-        safeOn(socket, 'request-to-share', ({ roomId, hostId, userId, userName, type }) => {
-            if (!users[roomId]) return;
-            const moderators = users[roomId].filter(u => u.role === 'host' || u.role === 'cohost');
-            moderators.forEach(mod => {
-                io.to(mod.socketId).emit('share-request-received', {
-                    userId, userName, type, requesterSocketId: socket.id
-                });
-            });
-        });
-
-        safeOn(socket, 'share-permission-response', ({ userId, approved, type }) => {
-            const roomId = socketToRoom[socket.id];
-            if (!isModerator(roomId, socket.id)) return;
-            io.to(userId).emit('share-request-result', { approved, type });
-        });
-
-        safeOn(socket, 'force-stop-share', ({ roomId, targetSocketId }) => {
-            if (!isModerator(roomId, socket.id)) return;
-            io.to(targetSocketId).emit('force-stop-share');
-        });
-
-        safeOn(socket, 'reconnect-room', async (roomID, userId, userName, isGuest) => {
-            if (!roomID || !userId) return;
-            if (socket.authUserId && !isGuest) userId = socket.authUserId;
-
-            const meeting = await Meeting.findOne({ meetingCode: roomID, deletedAt: null }).populate('hostId', 'name');
-            if (!meeting) { socket.emit('room-not-found'); return; }
-
-            const role = getRoomRole(meeting, userId, isGuest);
-            if (blockedUsers[roomID]?.has(userId)) { socket.emit('blocked'); return; }
-
-            // For reconnect: skip waiting room entirely (user was already in room)
-            await admitUser(socket, roomID, userId, userName, role, meeting);
-        });
-
-        safeOn(socket, 'disconnect', () => {
-            const roomID = socketToRoom[socket.id];
-            handleUserLeaving(socket, roomID);
-        });
-
-        safeOn(socket, 'leave-room', () => {
-            const roomID = socketToRoom[socket.id];
-            handleUserLeaving(socket, roomID);
-            if (roomID) socket.leave(roomID);
-        });
-
-        safeOn(socket, 'end-meeting', ({ roomId }) => {
-            if (!isHost(roomId, socket.id)) return;
-            io.to(roomId).emit('meeting-ended');
-            delete users[roomId];
-            delete sharingUser[roomId];
-            delete waitingRoom[roomId];
-            delete admittedUsers[roomId];
-            delete blockedUsers[roomId];
-        });
-
         safeOn(socket, 'kick-user', ({ roomId, targetSocketId, targetUserId }) => {
             if (!isModerator(roomId, socket.id)) return;
             io.to(targetSocketId).emit('kicked');
@@ -472,6 +445,91 @@ const socketHandler = (server, opts = {}) => {
             user.role = 'participant';
             io.to(targetSocketId).emit('role-updated', { role: 'participant' });
             io.to(roomId).emit('update-user-list', users[roomId]);
+        });
+
+        // ── File messages ──────────────────────────────────────────────────────
+        safeOn(socket, 'file-message', async ({ roomId, userId, userName, file }) => {
+            if (!roomId || !file || !file.data) return;
+            const senderUser = users[roomId]?.find(u => u.socketId === socket.id);
+            if (!senderUser) return;
+            const approxBytes = typeof file.data === 'string'
+                ? Math.floor(file.data.length * 3 / 4)
+                : 0;
+            if (approxBytes > MAX_FILE_BYTES) {
+                socket.emit('socket-error', { event: 'file-message', message: 'File too large' });
+                return;
+            }
+            if (!checkChatRate(socket.id)) {
+                socket.emit('socket-error', { event: 'file-message', message: 'Rate limit exceeded' });
+                return;
+            }
+            io.to(roomId).emit('chat-message', {
+                userName: senderUser.userName || userName,
+                senderId: socket.authUserId || userId || socket.id,
+                file,
+                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            });
+        });
+
+        // ── Screen share permission flow ───────────────────────────────────────
+        safeOn(socket, 'request-to-share', ({ roomId, userId, userName, type }) => {
+            if (!users[roomId]) return;
+            const moderators = users[roomId].filter(u => u.role === 'host' || u.role === 'cohost');
+            moderators.forEach(mod => {
+                io.to(mod.socketId).emit('share-request-received', {
+                    userId, userName, type, requesterSocketId: socket.id
+                });
+            });
+        });
+
+        safeOn(socket, 'share-permission-response', ({ userId, approved, type }) => {
+            const roomId = socketToRoom[socket.id];
+            if (!isModerator(roomId, socket.id)) return;
+            io.to(userId).emit('share-request-result', { approved, type });
+        });
+
+        safeOn(socket, 'force-stop-share', ({ roomId, targetSocketId }) => {
+            if (!isModerator(roomId, socket.id)) return;
+            io.to(targetSocketId).emit('force-stop-share');
+        });
+
+        // ── Reconnect (skip waiting room — user was already admitted) ──────────
+        safeOn(socket, 'reconnect-room', async (roomID, userId, userName) => {
+            if (!roomID || !userId) return;
+            if (socket.authUserId) userId = socket.authUserId;
+
+            const meeting = await Meeting.findOne({ meetingCode: roomID, deletedAt: null })
+                .populate('hostId', 'name')
+                .populate('coHosts', '_id');
+            if (!meeting) { socket.emit('room-not-found'); return; }
+
+            const role = getRoomRole(meeting, userId);
+            if (blockedUsers[roomID]?.has(userId)) { socket.emit('blocked'); return; }
+
+            // Skip waiting room on reconnect — user was already admitted
+            await admitUser(socket, roomID, userId, userName, role, meeting);
+        });
+
+        // ── Disconnect / Leave ─────────────────────────────────────────────────
+        safeOn(socket, 'disconnect', () => {
+            const roomID = socketToRoom[socket.id];
+            handleUserLeaving(socket, roomID);
+        });
+
+        safeOn(socket, 'leave-room', () => {
+            const roomID = socketToRoom[socket.id];
+            handleUserLeaving(socket, roomID);
+            if (roomID) socket.leave(roomID);
+        });
+
+        safeOn(socket, 'end-meeting', ({ roomId }) => {
+            if (!isHost(roomId, socket.id)) return;
+            io.to(roomId).emit('meeting-ended');
+            delete users[roomId];
+            delete sharingUser[roomId];
+            delete waitingRoom[roomId];
+            delete admittedUsers[roomId];
+            delete blockedUsers[roomId];
         });
     });
 };
