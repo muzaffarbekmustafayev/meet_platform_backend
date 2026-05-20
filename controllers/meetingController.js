@@ -231,19 +231,24 @@ const changeMeetingPassword = asyncHandler(async (req, res) => {
     const meeting = await Meeting.findById(req.params.id).select('+password');
     if (!meeting) { res.status(404); throw new Error('Meeting not found'); }
     if (meeting.hostId.toString() !== req.user._id.toString()) {
-        res.status(403); throw new Error('Only host can change room password');
-    }
-    if (meeting.roomType !== 'private') {
-        res.status(400); throw new Error('Only private meetings have passwords');
+        res.status(403); throw new Error('Only the host can change the room password');
     }
 
-    const { oldPassword, newPassword } = req.body;
-    const isMatch = await meeting.matchPassword(String(oldPassword));
-    if (!isMatch) { res.status(403); throw new Error('Current password is incorrect'); }
+    const newPassword = req.body.password?.trim() || '';
 
-    meeting.password = newPassword;
+    if (newPassword) {
+        if (newPassword.length < 6) {
+            res.status(400); throw new Error('Password must be at least 6 characters');
+        }
+        meeting.password = newPassword;
+        meeting.roomType = 'private';
+    } else {
+        meeting.password = undefined;
+        meeting.roomType = 'public';
+    }
+
     await meeting.save();
-    return res.json({ message: 'Password updated successfully' });
+    return res.json({ message: 'Room password updated successfully' });
 });
 
 module.exports = {

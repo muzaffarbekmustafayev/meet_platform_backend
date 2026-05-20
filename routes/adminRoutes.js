@@ -13,6 +13,7 @@ const {
 router.use(protect, admin);
 
 router.get('/stats', getStats);
+
 router.get('/users', getAllUsers);
 router.post('/users', validate(adminCreateUserSchema), createUser);
 router.put('/users/:id', validateObjectId('id'), validate(adminUpdateUserSchema), updateUser);

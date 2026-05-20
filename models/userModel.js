@@ -39,7 +39,7 @@ const userSchema = mongoose.Schema({
     },
     bio: {
         type: String,
-        default: 'Zamonaviy video aloqa tizimi ishqibozi.'
+        default: ''
     },
     contactsCount: {
         type: Number,

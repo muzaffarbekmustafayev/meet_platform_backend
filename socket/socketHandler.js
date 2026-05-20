@@ -4,6 +4,7 @@ const Meeting = require('../models/meetingModel');
 const Message = require('../models/messageModel');
 const User = require('../models/userModel');
 const { getAllowedOrigins } = require('../config/env');
+const { checkSocketAttempt, recordSocketFailure, clearSocketAttempts } = require('../middleware/rateLimiters');
 
 const CHAT_RATE_WINDOW_MS = 10 * 1000;
 const CHAT_RATE_MAX = 15;
@@ -220,7 +221,6 @@ const socketHandler = (server, opts = {}) => {
             // Password check for private rooms
             if (meeting.roomType === 'private') {
                 const clientIp = socket.handshake.address || 'unknown';
-                const { checkSocketAttempt, recordSocketFailure, clearSocketAttempts } = require('../middleware/rateLimiters');
                 const check = checkSocketAttempt(clientIp, roomID);
                 if (!check.allowed) {
                     socket.emit('error', {
