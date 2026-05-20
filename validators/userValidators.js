@@ -37,7 +37,7 @@ const adminCreateUserSchema = Joi.object({
 const adminUpdateUserSchema = Joi.object({
     name: Joi.string().trim().min(2).max(80).optional(),
     email: Joi.string().email().lowercase().trim().optional(),
-    password: Joi.string().min(6).max(128).optional(),
+    password: Joi.string().min(6).max(128).allow('').optional(),
     role: Joi.string().valid('user', 'admin').optional()
 });
 
