@@ -44,7 +44,7 @@ const meetingSchema = mongoose.Schema({
     }],
     settings: {
         isChatEnabled: { type: Boolean, default: true },
-        isWaitingRoomEnabled: { type: Boolean, default: true },
+        isWaitingRoomEnabled: { type: Boolean, default: false },
         muteAllOnEntry: { type: Boolean, default: false },
         allowScreenSharing: { type: Boolean, default: true }
     },

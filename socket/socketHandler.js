@@ -35,6 +35,8 @@ const socketHandler = (server, opts = {}) => {
     const waitingRoom = {};
     // roomId → Map<userId, timestamp>  (survives reconnect within TTL)
     const admittedUsers = {};
+    // roomId → Set<socketId> — moderator tomonidan demonstratsiyaga ruxsat berilganlar
+    const approvedSharers = {};
     // socketId → [timestamps]
     const chatRate = new Map();
 
@@ -108,6 +110,12 @@ const socketHandler = (server, opts = {}) => {
                 io.to(roomID).emit('update-user-list', room);
             }
         }
+        // Sharer left/disconnected → clear stale sharing state for the room
+        if (sharingUser[roomID]?.socketId === socket.id) {
+            delete sharingUser[roomID];
+            socket.to(roomID).emit('screen-sharing-stopped');
+        }
+        approvedSharers[roomID]?.delete(socket.id);
         socket.to(roomID).emit('user-disconnected', socket.id);
         delete socketToRoom[socket.id];
         chatRate.delete(socket.id);
@@ -193,7 +201,8 @@ const socketHandler = (server, opts = {}) => {
                     socketId: sharingUser[roomID].socketId,
                     userId: sharingUser[roomID].userId,
                     userName: sharingUser[roomID].userName,
-                    role: sharingUser[roomID].role
+                    role: sharingUser[roomID].role,
+                    screenStreamId: sharingUser[roomID].screenStreamId || null
                 });
             }
 
@@ -254,21 +263,6 @@ const socketHandler = (server, opts = {}) => {
                 return;
             }
 
-            // Waiting room logic
-            const waitingEnabled = meeting.settings?.isWaitingRoomEnabled !== false;
-            const canSkipWaiting = role === 'host' || role === 'cohost';
-            const alreadyAdmitted = admittedUsers[roomID]?.has(userId);
-
-            if (waitingEnabled && !canSkipWaiting && !alreadyAdmitted) {
-                // Place in waiting room
-                if (!waitingRoom[roomID]) waitingRoom[roomID] = [];
-                // Remove stale entry for same user (e.g. page refresh)
-                waitingRoom[roomID] = waitingRoom[roomID].filter(u => u.userId !== userId && u.socketId !== socket.id);
-                waitingRoom[roomID].push({ socketId: socket.id, userId, userName });
-                socket.emit('waiting-room');
-                broadcastWaitingRoom(roomID);
-                return;
-            }
 
             await admitUser(socket, roomID, userId, userName, role, meeting);
         });
@@ -370,15 +364,37 @@ const socketHandler = (server, opts = {}) => {
         });
 
         // ── Screen share ───────────────────────────────────────────────────────
-        safeOn(socket, 'start-screen-share', ({ roomId }) => {
+        safeOn(socket, 'start-screen-share', ({ roomId, screenStreamId }) => {
             const me = users[roomId]?.find(u => u.socketId === socket.id);
             if (!me) return;
-            sharingUser[roomId] = { socketId: socket.id, userId: me.userId, userName: me.userName, role: me.role };
+
+            const moderator = isModerator(roomId, socket.id);
+            const approved = approvedSharers[roomId]?.has(socket.id);
+            // Oddiy ishtirokchi faqat moderator ruxsati bilan demonstratsiya qila oladi
+            if (!moderator && !approved) {
+                socket.emit('socket-error', { event: 'start-screen-share', message: 'Share permission required' });
+                return;
+            }
+            // Boshqa odam allaqachon demonstratsiya qilayotgan bo'lsa:
+            // moderator uni siqib chiqaradi (takeover), oddiy ishtirokchi rad etiladi
+            if (sharingUser[roomId] && sharingUser[roomId].socketId !== socket.id) {
+                if (!moderator) {
+                    socket.emit('socket-error', { event: 'start-screen-share', message: 'Another user is already sharing' });
+                    return;
+                }
+                io.to(sharingUser[roomId].socketId).emit('force-stop-share');
+            }
+            // screenStreamId — receivers use it to tell the screen stream apart from the camera stream
+            sharingUser[roomId] = { socketId: socket.id, userId: me.userId, userName: me.userName, role: me.role, screenStreamId: screenStreamId || null };
             socket.to(roomId).emit('screen-sharing-started', sharingUser[roomId]);
         });
 
         safeOn(socket, 'stop-screen-share', ({ roomId }) => {
-            if (sharingUser[roomId] && sharingUser[roomId].socketId !== socket.id && !isModerator(roomId, socket.id)) return;
+            // Ruxsat bir martalik — to'xtatilgach qayta so'rash kerak
+            approvedSharers[roomId]?.delete(socket.id);
+            // Faqat sharer'ning o'zi (yoki moderator) to'xtata oladi; takeover'dan keyin
+            // eski sharer'ning kechikkan stop'i yangi demonstratsiyani buzmasligi kerak
+            if (sharingUser[roomId] && sharingUser[roomId].socketId !== socket.id) return;
             delete sharingUser[roomId];
             socket.to(roomId).emit('screen-sharing-stopped');
         });
@@ -404,7 +420,8 @@ const socketHandler = (server, opts = {}) => {
             if (!user) return;
             if (micStatus !== undefined) user.micStatus = micStatus;
             if (videoStatus !== undefined) user.videoStatus = videoStatus;
-            io.to(roomId).emit('update-user-list', users[roomId]);
+            // Delta event instead of broadcasting the full list (O(N²) at scale)
+            io.to(roomId).emit('user-media-updated', { socketId: socket.id, micStatus: user.micStatus, videoStatus: user.videoStatus });
         });
 
         safeOn(socket, 'block-user', ({ roomId, targetUserId, targetSocketId }) => {
@@ -485,6 +502,14 @@ const socketHandler = (server, opts = {}) => {
         safeOn(socket, 'share-permission-response', ({ userId, approved, type }) => {
             const roomId = socketToRoom[socket.id];
             if (!isModerator(roomId, socket.id)) return;
+            // userId = requesterSocketId — ruxsatni server tomonda qayd qilamiz,
+            // aks holda client tekshiruvni chetlab o'tishi mumkin
+            if (approved) {
+                if (!approvedSharers[roomId]) approvedSharers[roomId] = new Set();
+                approvedSharers[roomId].add(userId);
+            } else {
+                approvedSharers[roomId]?.delete(userId);
+            }
             io.to(userId).emit('share-request-result', { approved, type });
         });
 
@@ -530,6 +555,7 @@ const socketHandler = (server, opts = {}) => {
             delete waitingRoom[roomId];
             delete admittedUsers[roomId];
             delete blockedUsers[roomId];
+            delete approvedSharers[roomId];
         });
     });
 };
