@@ -45,6 +45,11 @@ const updateRoleSchema = Joi.object({
     role: Joi.string().valid('user', 'admin').required()
 });
 
+const adminBulkUsersSchema = Joi.object({
+    action: Joi.string().valid('block', 'unblock', 'delete').required(),
+    ids: Joi.array().items(Joi.string().hex().length(24)).min(1).max(200).required()
+});
+
 module.exports = {
     registerSchema,
     loginSchema,
@@ -52,5 +57,6 @@ module.exports = {
     updateProfileSchema,
     adminCreateUserSchema,
     adminUpdateUserSchema,
-    updateRoleSchema
+    updateRoleSchema,
+    adminBulkUsersSchema
 };
