@@ -9,12 +9,23 @@ const generateMeetingCode = () => {
 };
 
 const generateUniqueMeetingCode = async () => {
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 10; i++) {
         const code = generateMeetingCode();
         const exists = await Meeting.exists({ meetingCode: code });
         if (!exists) return code;
     }
     throw new Error('Could not generate a unique meeting code');
+};
+
+// Faqat ruxsat etilgan sozlama maydonlarini olamiz (model default'lari ustiga).
+// Validatsiya Joi'da bo'lgan; bu yerda faqat oq ro'yxat (whitelist).
+const pickSettings = (input) => {
+    if (!input || typeof input !== 'object') return undefined;
+    const out = {};
+    for (const key of ['isChatEnabled', 'isWaitingRoomEnabled', 'muteAllOnEntry', 'allowScreenSharing']) {
+        if (typeof input[key] === 'boolean') out[key] = input[key];
+    }
+    return Object.keys(out).length ? out : undefined;
 };
 
 const sanitizeMeeting = (meeting) => {
@@ -35,24 +46,40 @@ const createMeeting = asyncHandler(async (req, res) => {
         }
     }
 
-    const meetingCode = await generateUniqueMeetingCode();
+    const settings = pickSettings(req.body.settings);
 
-    const meeting = await Meeting.create({
-        hostId: req.user._id,
-        title: title || `${req.user.name}'s Meeting`,
-        meetingCode,
-        roomType: roomType || 'public',
-        password: roomType === 'private' ? String(password).trim() : undefined
-    });
+    // Race-safe yaratish: meetingCode'da unique indeks bor. Ikki so'rov bir vaqtda
+    // bir xil kod tanlasa, biri E11000 (duplicate) beradi — bunday holda yangi kod
+    // bilan qayta urinamiz (uzog'i bilan 3 marta).
+    let meeting;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            meeting = await Meeting.create({
+                hostId: req.user._id,
+                title: title || `${req.user.name}'s Meeting`,
+                meetingCode: await generateUniqueMeetingCode(),
+                roomType: roomType || 'public',
+                password: roomType === 'private' ? String(password).trim() : undefined,
+                ...(settings ? { settings } : {})
+            });
+            break;
+        } catch (err) {
+            // 11000 — duplicate key (meetingCode to'qnashuvi); boshqa xato bo'lsa — tashlaymiz
+            if (err?.code === 11000 && attempt < 2) continue;
+            throw err;
+        }
+    }
 
     return res.status(201).json(sanitizeMeeting(meeting));
 });
 
 const getMeetingByCode = asyncHandler(async (req, res) => {
+    // Bu endpoint kodni bilgan har kimga ochiq (xonaga kirishdan oldin). Shu sababli
+    // email kabi maxfiy maydonlarni OSHKOR QILMAYMIZ — faqat UI uchun zarur ism/avatar.
     const meeting = await Meeting.findOne({ meetingCode: req.params.code, deletedAt: null })
         .select('+password')
-        .populate('hostId', 'name email avatar')
-        .populate('coHosts', 'name email');
+        .populate('hostId', 'name avatar')
+        .populate('coHosts', 'name avatar');
 
     if (!meeting) {
         res.status(404);

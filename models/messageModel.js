@@ -27,12 +27,13 @@ const messageSchema = mongoose.Schema({
     timestamps: true
 });
 
-// Xabar matnsiz bo'lsa ham, hech bo'lmasa fayl bo'lishi shart
-messageSchema.pre('validate', function (next) {
+// Xabar matnsiz bo'lsa ham, hech bo'lmasa fayl bo'lishi shart.
+// Mongoose 9'da middleware'dagi `next` callback olib tashlangan — sync hook
+// xatoni `throw` qiladi (eski `next(err)` uslubi "next is not a function" berardi).
+messageSchema.pre('validate', function () {
     const hasText = this.text && this.text.trim();
     const hasFile = this.file && this.file.data;
-    if (!hasText && !hasFile) return next(new Error('Message must have text or a file'));
-    next();
+    if (!hasText && !hasFile) throw new Error('Message must have text or a file');
 });
 
 messageSchema.index({ meetingId: 1, createdAt: 1 });

@@ -42,6 +42,28 @@ const socketHandler = (server, opts = {}) => {
     const approvedSharers = {};
     // socketId → [timestamps]
     const chatRate = new Map();
+    // roomId → { isChatEnabled, isWaitingRoomEnabled, muteAllOnEntry, allowScreenSharing }
+    // Xona sozlamalari xotirada (har chat/share'da DB'ga bormaslik uchun). admitUser'da
+    // DB'dan to'ldiriladi, host jonli o'zgartirsa yangilanadi.
+    const roomSettings = {};
+
+    const DEFAULT_SETTINGS = {
+        isChatEnabled: true,
+        isWaitingRoomEnabled: false,
+        muteAllOnEntry: false,
+        allowScreenSharing: true
+    };
+
+    // Mongoose subdoc yoki oddiy obyektdan xavfsiz, to'liq sozlama obyekti yasaymiz.
+    function normalizeSettings(raw) {
+        const s = raw && typeof raw === 'object' ? (raw.toObject ? raw.toObject() : raw) : {};
+        return {
+            isChatEnabled:        typeof s.isChatEnabled === 'boolean' ? s.isChatEnabled : DEFAULT_SETTINGS.isChatEnabled,
+            isWaitingRoomEnabled: typeof s.isWaitingRoomEnabled === 'boolean' ? s.isWaitingRoomEnabled : DEFAULT_SETTINGS.isWaitingRoomEnabled,
+            muteAllOnEntry:       typeof s.muteAllOnEntry === 'boolean' ? s.muteAllOnEntry : DEFAULT_SETTINGS.muteAllOnEntry,
+            allowScreenSharing:   typeof s.allowScreenSharing === 'boolean' ? s.allowScreenSharing : DEFAULT_SETTINGS.allowScreenSharing
+        };
+    }
 
     const cleanupAdmitted = () => {
         const now = Date.now();
@@ -73,6 +95,23 @@ const socketHandler = (server, opts = {}) => {
         return 'participant';
     }
 
+    // Rollarni DB (yagona haqiqat manbai) bilan moslaymiz: yaratuvchi=host doim,
+    // DB coHosts=cohost, qolgani=participant. Har kim qo'shilganda/promotion bo'lganda
+    // chaqiriladi — xotiradagi rol hech qachon DB'dan ajralib qolmaydi, shuning uchun
+    // rollar "almashib" yoki "ishlamay" qolmaydi.
+    function syncRolesFromMeeting(roomId, meeting) {
+        const room = users[roomId];
+        if (!room) return;
+        for (const u of room) {
+            const correct = getRoomRole(meeting, u.userId);
+            if (u.role !== correct) {
+                u.role = correct;
+                io.to(u.socketId).emit('role-updated', { role: correct });
+            }
+        }
+        io.to(roomId).emit('update-user-list', room);
+    }
+
     function broadcastWaitingRoom(roomId) {
         if (!users[roomId]) return;
         users[roomId]
@@ -88,25 +127,17 @@ const socketHandler = (server, opts = {}) => {
         }
         let room = users[roomID];
         if (room) {
-            const leaving = room.find(u => u.socketId === socket.id);
-            const wasHost = leaving?.role === 'host';
-
             room = room.filter(u => u.socketId !== socket.id);
             users[roomID] = room;
 
             if (room.length === 0) {
                 delete users[roomID];
+                delete roomSettings[roomID];
             } else {
-                // Host vaqtincha chiqsa, xona moderatorsiz qolmasin — keyingi a'zoni
-                // COHOST qilamiz (host EMAS). Asl host qaytsa getRoomRole unga yana
-                // 'host' beradi; shu tariqa hech qachon bir nechta host paydo bo'lmaydi.
-                if (wasHost && !room.some(u => u.role === 'cohost')) {
-                    const next = room[0];
-                    if (next) {
-                        next.role = 'cohost';
-                        io.to(next.socketId).emit('role-updated', { role: 'cohost' });
-                    }
-                }
+                // Rollarni KO'CHIRMAYMIZ. Rol — DB'ning sof proyeksiyasi: yaratuvchi
+                // har doim host, coHosts — cohost, qolgani participant. Host vaqtincha
+                // chiqib qaytsa, getRoomRole unga yana 'host' beradi. Tasodifiy a'zoga
+                // moderator huquqini bermaymiz — bu rollarning "almashishi"ga sabab edi.
                 io.to(roomID).emit('update-user-list', room);
             }
         }
@@ -184,6 +215,9 @@ const socketHandler = (server, opts = {}) => {
             socket.join(roomID);
             socketToRoom[socket.id] = roomID;
 
+            // Xona sozlamalarini DB'dan xotiraga olamiz (yagona joriy nusxa)
+            roomSettings[roomID] = normalizeSettings(meeting?.settings);
+
             if (!admittedUsers[roomID]) admittedUsers[roomID] = new Map();
             admittedUsers[roomID].set(userId, Date.now());
 
@@ -191,21 +225,16 @@ const socketHandler = (server, opts = {}) => {
             if (users[roomID]) users[roomID].push(userData);
             else users[roomID] = [userData];
 
-            // Rollarni DB (yagona haqiqat manbai) bilan moslaymiz: yaratuvchi=host,
-            // DB coHosts=cohost, qolgani=participant. Shu tariqa eski/stale "ortiqcha
-            // host" o'z-o'zidan tuzatiladi — bir nechta host paydo bo'lib qolmaydi.
-            for (const u of users[roomID]) {
-                const correct = getRoomRole(meeting, u.userId);
-                if (u.role !== correct) {
-                    u.role = correct;
-                    if (u.socketId !== socket.id) io.to(u.socketId).emit('role-updated', { role: correct });
-                }
-            }
+            // Xotiradagi barcha rollarni DB bilan moslab, hammaga tarqatamiz.
+            // Joriy socket'ning ro'yxatdagi roli ham shu yerda DB bo'yicha aniqlanadi —
+            // 'your-role'ni xotiradan o'qib yuboramiz (param bilan ajralib qolmaydi).
+            syncRolesFromMeeting(roomID, meeting);
 
-            socket.emit('your-role', { role });
+            const myRole = users[roomID].find(u => u.socketId === socket.id)?.role || role;
+            socket.emit('your-role', { role: myRole });
+            socket.emit('room-settings', roomSettings[roomID]);
             const usersInThisRoom = users[roomID].filter(u => u.socketId !== socket.id);
             socket.emit('all-users', usersInThisRoom);
-            io.to(roomID).emit('update-user-list', users[roomID]);
 
             // Moderator endigina kirgan bo'lsa — joriy kutish xonasini unga uzatamiz
             if ((role === 'host' || role === 'cohost') && waitingRoom[roomID]?.length) {
@@ -286,14 +315,12 @@ const socketHandler = (server, opts = {}) => {
                 return;
             }
 
-            // Ruxsat oqimi: FAQAT private xonada host tasdig'i kerak.
-            // Public xonaga har doim to'g'ridan-to'g'ri kiriladi (sozlamadan qat'i nazar).
-            // Moderator (host/cohost) va ilgari qabul qilingan foydalanuvchi
-            // (TTL ichida — reconnect) hech qachon kutmaydi.
+            // Ruxsat oqimi: FAQAT private xonada host tasdig'i kerak. Public xonaga
+            // har doim to'g'ridan-to'g'ri kiriladi. Moderator (host/cohost) va ilgari
+            // qabul qilingan foydalanuvchi (TTL ichida — reconnect) hech qachon kutmaydi.
             const isMod = role === 'host' || role === 'cohost';
             const alreadyAdmitted = admittedUsers[roomID]?.has(userId);
-            const needsApproval =
-                meeting.roomType === 'private' && !isMod && !alreadyAdmitted;
+            const needsApproval = meeting.roomType === 'private' && !isMod && !alreadyAdmitted;
 
             if (needsApproval) {
                 if (!waitingRoom[roomID]) waitingRoom[roomID] = [];
@@ -364,6 +391,11 @@ const socketHandler = (server, opts = {}) => {
             }
             const senderUser = users[roomId]?.find(u => u.socketId === socket.id);
             if (!senderUser) return;
+            // Chat o'chirilgan bo'lsa, faqat moderator yoza oladi
+            if (roomSettings[roomId]?.isChatEnabled === false && !isModerator(roomId, socket.id)) {
+                socket.emit('socket-error', { event: 'chat-message', message: 'Chat is disabled' });
+                return;
+            }
             const senderId = socket.authUserId || userId || socket.id;
 
             const newMessage = await Message.create({
@@ -413,6 +445,11 @@ const socketHandler = (server, opts = {}) => {
 
             const moderator = isModerator(roomId, socket.id);
             const approved = approvedSharers[roomId]?.has(socket.id);
+            // Host demonstratsiyani umuman o'chirgan bo'lsa — oddiy ishtirokchi shareyola olmaydi
+            if (!moderator && roomSettings[roomId]?.allowScreenSharing === false) {
+                socket.emit('socket-error', { event: 'start-screen-share', message: 'Screen sharing is disabled' });
+                return;
+            }
             // Oddiy ishtirokchi faqat moderator ruxsati bilan demonstratsiya qila oladi
             if (!moderator && !approved) {
                 socket.emit('socket-error', { event: 'start-screen-share', message: 'Share permission required' });
@@ -487,28 +524,74 @@ const socketHandler = (server, opts = {}) => {
             }
         });
 
-        safeOn(socket, 'promote-cohost', ({ roomId, targetUserId, targetSocketId }) => {
-            if (!isHost(roomId, socket.id)) return;
-            if (!users[roomId]) return;
-            const user = users[roomId].find(u => u.socketId === targetSocketId);
-            if (!user) return;
-            user.role = 'cohost';
-            io.to(targetSocketId).emit('role-updated', { role: 'cohost' });
-            io.to(roomId).emit('update-user-list', users[roomId]);
+        // Server-authoritative: faqat haqiqiy DB host cohost tayinlay/yecha oladi va
+        // o'zgarish DB'ga yoziladi (yagona haqiqat manbai). Frontend'ga ishonmaymiz.
+        async function getMeetingForRoom(roomId) {
+            return Meeting.findOne({ meetingCode: roomId, deletedAt: null })
+                .populate('hostId', 'name')
+                .populate('coHosts', '_id');
+        }
+
+        function actorIsDbHost(roomId, meeting) {
+            const me = users[roomId]?.find(u => u.socketId === socket.id);
+            if (!me || !meeting) return false;
+            const hostId = meeting.hostId?._id ? String(meeting.hostId._id) : String(meeting.hostId);
+            return hostId === String(me.userId);
+        }
+
+        safeOn(socket, 'promote-cohost', async ({ roomId, targetUserId, targetSocketId }) => {
+            if (!users[roomId] || !targetUserId) return;
+            const meeting = await getMeetingForRoom(roomId);
+            if (!actorIsDbHost(roomId, meeting)) return;
+            const hostId = meeting.hostId?._id ? String(meeting.hostId._id) : String(meeting.hostId);
+            // Hostni cohost qilib bo'lmaydi (u allaqachon eng yuqori rol)
+            if (String(targetUserId) === hostId) return;
+
+            const coHostIds = (meeting.coHosts || []).map(c => String(c._id || c));
+            if (!coHostIds.includes(String(targetUserId))) {
+                meeting.coHosts.push(targetUserId);
+                await meeting.save();
+            }
+            // Xotiradagi rollarni DB bilan moslab hammaga tarqatamiz
+            syncRolesFromMeeting(roomId, meeting);
             // Yangi moderatorga joriy kutish xonasini ko'rsatamiz
-            if (waitingRoom[roomId]?.length) {
+            if (waitingRoom[roomId]?.length && targetSocketId) {
                 io.to(targetSocketId).emit('waiting-room-update', waitingRoom[roomId]);
             }
         });
 
-        safeOn(socket, 'demote-cohost', ({ roomId, targetUserId, targetSocketId }) => {
-            if (!isHost(roomId, socket.id)) return;
-            if (!users[roomId]) return;
-            const user = users[roomId].find(u => u.socketId === targetSocketId);
-            if (!user) return;
-            user.role = 'participant';
-            io.to(targetSocketId).emit('role-updated', { role: 'participant' });
-            io.to(roomId).emit('update-user-list', users[roomId]);
+        safeOn(socket, 'demote-cohost', async ({ roomId, targetUserId }) => {
+            if (!users[roomId] || !targetUserId) return;
+            const meeting = await getMeetingForRoom(roomId);
+            if (!actorIsDbHost(roomId, meeting)) return;
+
+            const before = (meeting.coHosts || []).length;
+            meeting.coHosts = (meeting.coHosts || []).filter(c => String(c._id || c) !== String(targetUserId));
+            if (meeting.coHosts.length !== before) await meeting.save();
+            syncRolesFromMeeting(roomId, meeting);
+        });
+
+        // Jonli sozlama yangilash — faqat DB host. DB'ga yoziladi, xotira yangilanadi
+        // va butun xonaga tarqatiladi (chat/share/waiting-room darhol ta'sirlanadi).
+        safeOn(socket, 'update-room-settings', async ({ roomId, settings }) => {
+            if (!users[roomId] || !settings || typeof settings !== 'object') return;
+            const meeting = await getMeetingForRoom(roomId);
+            if (!actorIsDbHost(roomId, meeting)) return;
+
+            // Faqat ruxsat etilgan boolean maydonlarni qabul qilamiz (whitelist)
+            const allowed = ['isChatEnabled', 'isWaitingRoomEnabled', 'muteAllOnEntry', 'allowScreenSharing'];
+            let changed = false;
+            for (const key of allowed) {
+                if (typeof settings[key] === 'boolean') {
+                    meeting.settings[key] = settings[key];
+                    changed = true;
+                }
+            }
+            if (!changed) return;
+
+            await meeting.save();
+            roomSettings[roomId] = normalizeSettings(meeting.settings);
+            io.to(roomId).emit('room-settings-updated', roomSettings[roomId]);
         });
 
         // ── File messages ──────────────────────────────────────────────────────
@@ -516,6 +599,11 @@ const socketHandler = (server, opts = {}) => {
             if (!roomId || !file || !file.data) return;
             const senderUser = users[roomId]?.find(u => u.socketId === socket.id);
             if (!senderUser) return;
+            // Chat o'chirilgan bo'lsa, fayl ham yuborib bo'lmaydi (moderatordan tashqari)
+            if (roomSettings[roomId]?.isChatEnabled === false && !isModerator(roomId, socket.id)) {
+                socket.emit('socket-error', { event: 'file-message', message: 'Chat is disabled' });
+                return;
+            }
             const approxBytes = typeof file.data === 'string'
                 ? Math.floor(file.data.length * 3 / 4)
                 : 0;
@@ -553,6 +641,12 @@ const socketHandler = (server, opts = {}) => {
         // ── Screen share permission flow ───────────────────────────────────────
         safeOn(socket, 'request-to-share', ({ roomId, userId, userName, type }) => {
             if (!users[roomId]) return;
+            // Demonstratsiya o'chirilgan bo'lsa — so'rovni hostga yubormay, darrov rad etamiz
+            if (!isModerator(roomId, socket.id) && roomSettings[roomId]?.allowScreenSharing === false) {
+                socket.emit('share-request-result', { approved: false, type });
+                socket.emit('socket-error', { event: 'request-to-share', message: 'Screen sharing is disabled' });
+                return;
+            }
             const moderators = users[roomId].filter(u => u.role === 'host' || u.role === 'cohost');
             moderators.forEach(mod => {
                 io.to(mod.socketId).emit('share-request-received', {
@@ -618,8 +712,10 @@ const socketHandler = (server, opts = {}) => {
             delete admittedUsers[roomId];
             delete blockedUsers[roomId];
             delete approvedSharers[roomId];
+            delete roomSettings[roomId];
         });
     });
 };
 
 module.exports = socketHandler;
+
